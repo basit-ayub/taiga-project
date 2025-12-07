@@ -13,9 +13,10 @@ permissions:
 
 jobs:
   # ==============================================================================
-  # STAGE 1: CONTINUOUS INTEGRATION
+  # STAGE 1: CONTINUOUS INTEGRATION (TESTING)
   # ==============================================================================
-
+  
+  # JOB 1: BACKEND TESTS (Whitebox)
   backend-tests:
     runs-on: ubuntu-latest
     services:
@@ -84,7 +85,7 @@ jobs:
           name: backend-coverage
           path: backend/htmlcov/
 
-# JOB 2: FRONTEND E2E TESTS (Cypress Headless + Clean Report)
+  # JOB 2: FRONTEND E2E TESTS 
   frontend-tests:
     runs-on: ubuntu-latest
     steps:
@@ -151,50 +152,31 @@ jobs:
           npm install
           npx cypress install
 
-      # 1. RUN CYPRESS AND CAPTURE RAW OUTPUT
       - name: Run Cypress Tests
         continue-on-error: true 
         run: |
           cd e2e-tests
-          # Pipe output to a file named raw.log
-          npx cypress run --browser chrome > raw.log 2>&1
+          # Capture output to raw.log
+          npx cypress run --browser chrome > raw.log 2>&1 || true
 
-      # 2. CLEANUP THE LOGS (Remove Colors & Extract Table)
       - name: Process Test Logs
         if: always()
         run: |
           cd e2e-tests
-          
-          # Step A: Remove ANSI color codes (The [90m stuff)
+          # Remove ANSI colors
           sed -r "s/\x1B\[([0-9]{1,3}(;[0-9]{1,2};?)?)?[mGK]//g" raw.log > clean.log
-          
-          # Step B: Extract only the part starting from "(Run Finished)" to the end
-          # If "(Run Finished)" isn't found, it just cat's the whole thing (fallback)
+          # Extract only the summary table
           sed -n '/(Run Finished)/,$p' clean.log > summary.txt
-          
-          # Check if summary is empty (if grep failed), fall back to last 50 lines
-          if [ ! -s summary.txt ]; then
-            tail -n 50 clean.log > summary.txt
-          fi
+          if [ ! -s summary.txt ]; then tail -n 50 clean.log > summary.txt; fi
 
-      # 3. GENERATE CLEAN HTML
       - name: Generate Frontend Report
         if: always()
         run: |
           mkdir -p frontend-report
-          
-          echo '<html><head><title>Frontend E2E Results</title>' > frontend-report/index.html
-          echo '<style>body { font-family: monospace; background: #222; color: #fff; padding: 20px; }</style>' >> frontend-report/index.html
-          echo '</head><body>' >> frontend-report/index.html
-          
-          echo '<h1>Cypress Execution Summary</h1>' >> frontend-report/index.html
-          
-          echo '<div style="background: #000; padding: 20px; border-radius: 5px; border: 1px solid #444;">' >> frontend-report/index.html
-          echo '<pre>' >> frontend-report/index.html
+          echo '<html><head><title>Frontend E2E Results</title><style>body{font-family:monospace;background:#222;color:#fff;padding:20px;}</style></head><body>' > frontend-report/index.html
+          echo '<h1>Cypress Execution Summary</h1><div style="background:#000;padding:20px;border:1px solid #444;"><pre>' >> frontend-report/index.html
           cat e2e-tests/summary.txt >> frontend-report/index.html
-          echo '</pre></div>' >> frontend-report/index.html
-          
-          echo '</body></html>' >> frontend-report/index.html
+          echo '</pre></div></body></html>' >> frontend-report/index.html
 
       - name: Upload Frontend Report
         if: always()
@@ -204,20 +186,18 @@ jobs:
           path: frontend-report/
 
   # ==============================================================================
-  # STAGE 2: BUILD ARTIFACTS (Docker Hub)
+  # STAGE 2: BUILD ARTIFACTS
   # ==============================================================================
   build-and-push:
     needs: [backend-tests, frontend-tests]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      
       - name: Login to Docker Hub
         uses: docker/login-action@v3
         with:
           username: ${{ secrets.DOCKER_USERNAME }}
           password: ${{ secrets.DOCKER_PASSWORD }}
-
       - name: Build & Push Backend
         uses: docker/build-push-action@v5
         with:
@@ -225,7 +205,6 @@ jobs:
           file: ./backend/docker/Dockerfile
           push: true
           tags: ${{ secrets.DOCKER_USERNAME }}/taiga-back:latest
-
       - name: Build & Push Frontend
         uses: docker/build-push-action@v5
         with:
@@ -235,7 +214,7 @@ jobs:
           tags: ${{ secrets.DOCKER_USERNAME }}/taiga-front:latest
 
   # ==============================================================================
-  # STAGE 3: STAGING DEPLOYMENT (DigitalOcean)
+  # STAGE 3: STAGING DEPLOYMENT
   # ==============================================================================
   deploy-staging:
     needs: build-and-push
@@ -258,24 +237,26 @@ jobs:
           username: root
           key: ${{ secrets.SSH_KEY }}
           script: |
-            # 1. Login to Docker Hub
             echo "${{ secrets.DOCKER_PASSWORD }}" | docker login -u "${{ secrets.DOCKER_USERNAME }}" --password-stdin
-            
-            # 2. Pull Latest Images
             docker pull ${{ secrets.DOCKER_USERNAME }}/taiga-back:latest
             docker pull ${{ secrets.DOCKER_USERNAME }}/taiga-front:latest
             
-            # 3. Prepare Directory
             mkdir -p /root/taiga-deploy
             cd /root/taiga-deploy
             
-            # 4. Create docker-compose.yml dynamically
+            # Note: We include the Gateway and fix RabbitMQ/Postgres variables here
             cat <<EOF > docker-compose.yml
             version: "3.5"
             services:
+              taiga-gateway:
+                image: nginx:alpine
+                ports: ["9000:80"]
+                volumes:
+                  - ./taiga.conf:/etc/nginx/conf.d/default.conf
+                depends_on: [taiga-front, taiga-back, taiga-events]
+
               taiga-front:
                 image: ${{ secrets.DOCKER_USERNAME }}/taiga-front:latest
-                ports: ["9000:80"]
                 depends_on: [taiga-back]
               
               taiga-back:
@@ -283,6 +264,10 @@ jobs:
                 environment:
                   - POSTGRES_USER=taiga
                   - POSTGRES_PASSWORD=taiga
+                  - POSTGRES_DB=taiga
+                  - POSTGRES_HOST=taiga-db
+                  - RABBITMQ_USER=taiga
+                  - RABBITMQ_PASS=taiga
                   - TAIGA_SECRET_KEY=prod-secret-key
                   - TAIGA_SITES_SCHEME=http
                   - TAIGA_SITES_DOMAIN=${{ secrets.DROPLET_IP }}:9000
@@ -308,26 +293,32 @@ jobs:
                   - TAIGA_SECRET_KEY=prod-secret-key
                   - POSTGRES_USER=taiga
                   - POSTGRES_PASSWORD=taiga
+                  - POSTGRES_DB=taiga
+                  - POSTGRES_HOST=taiga-db
+                  - RABBITMQ_USER=taiga
+                  - RABBITMQ_PASS=taiga
               
               taiga-events-rabbitmq:
                 image: rabbitmq:3.8-management-alpine
                 environment:
                   - RABBITMQ_DEFAULT_USER=taiga
                   - RABBITMQ_DEFAULT_PASS=taiga
+                  - RABBITMQ_DEFAULT_VHOST=taiga
               
               taiga-async-rabbitmq:
                 image: rabbitmq:3.8-management-alpine
                 environment:
                   - RABBITMQ_DEFAULT_USER=taiga
                   - RABBITMQ_DEFAULT_PASS=taiga
+                  - RABBITMQ_DEFAULT_VHOST=taiga
             EOF
             
-            # 5. Start Staging
+            # Restart Services
             docker compose down || true
             docker compose up -d
 
   # ==============================================================================
-  # STAGE 4: PRODUCTION DEPLOYMENT (Manual Approval Required)
+  # STAGE 4: PRODUCTION DEPLOYMENT
   # ==============================================================================
   deploy-production:
     needs: deploy-staging
@@ -372,7 +363,7 @@ jobs:
         with: {name: backend-coverage, path: public/backend}
       - uses: actions/download-artifact@v4
         with: {name: frontend-coverage, path: public/frontend}
-      - run: echo '<html><h1>Taiga Reports</h1><ul><li><a href="backend/index.html">Backend</a></li><li><a href="frontend/index.html">Frontend</a></li></ul></html>' > public/index.html
+      - run: echo '<html><h1>Taiga Reports</h1><ul><li><a href="backend/index.html">Backend Coverage (Pytest)</a></li><li><a href="frontend/index.html">Frontend E2E Results (Cypress)</a></li></ul></html>' > public/index.html
       - uses: actions/configure-pages@v5
       - uses: actions/upload-pages-artifact@v3
         with: {path: 'public'}
