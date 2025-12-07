@@ -12,8 +12,8 @@ permissions:
   id-token: write
 
 jobs:
-  # ------------------------------------------------------------------
-  # JOB 1: BACKEND LEGACY TESTS
+# ------------------------------------------------------------------
+  # JOB 1: BACKEND LEGACY TESTS (Whitebox)
   # ------------------------------------------------------------------
   backend-legacy-tests:
     runs-on: ubuntu-latest
@@ -42,15 +42,12 @@ jobs:
         with:
           python-version: '3.11'
 
-      # FIX 1: AGGRESSIVE CONFIG REPLACEMENT
       - name: Prepare Backend Environment
         run: |
           cp backend/docker/config.py backend/settings/config.py
           
-          # 1. Try to replace existing line if it exists
+          # Force set the Secret Key so it can't fail
           sed -i "s/SECRET_KEY =.*/SECRET_KEY = 'hardcoded-ci-key-123'/" backend/settings/config.py
-          
-          # 2. Append it to the end just in case it wasn't there
           echo "" >> backend/settings/config.py
           echo "SECRET_KEY = 'hardcoded-ci-key-123'" >> backend/settings/config.py
           
@@ -64,17 +61,27 @@ jobs:
           pip install -r backend/requirements-devel.txt
           pip install pytest-django pytest-cov
 
-      - name: Run Pytest
+      - name: Run Pytest (Legacy Suite)
         env:
           DJANGO_SETTINGS_MODULE: settings.config
           PYTHONPATH: backend
+          SECRET_KEY: "hardcoded-ci-key-123"
+          
+          # --- THE FIX: PROVIDE ALL POSSIBLE VARIABLE NAMES ---
+          # Taiga Variable Names
           TAIGA_DB_NAME: test_taiga
           TAIGA_DB_USER: postgres
           TAIGA_DB_PASSWORD: password123
           TAIGA_DB_HOST: localhost
           TAIGA_RABBITMQ_HOST: localhost
-          # Double redundancy: Set Env Var too
-          SECRET_KEY: "hardcoded-ci-key-123"
+          
+          # Docker/Standard Variable Names (The config.py likely needs these!)
+          POSTGRES_DB: test_taiga
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: password123
+          POSTGRES_HOST: localhost
+          # ----------------------------------------------------
+          
         run: |
           cd backend
           pytest --cov=. --cov-report=html:htmlcov
@@ -120,7 +127,7 @@ jobs:
       
       # 1. Start Dependencies ONLY (DB + Rabbit)
       - name: Start Database
-        run: docker compose up -d db rabbitmq
+        run: docker compose up -d taiga-db taiga-async-rabbitmq taiga-events-rabbitmq
 
       - name: Wait for Database
         run: sleep 10
