@@ -31,6 +31,7 @@ RUN set -eux; \
     # install system dependencies
     apt-get install -y \
        build-essential \
+       gnupg \
        gettext \
        # libpq5 needed in runtime for psycopg2
        libpq5 \
