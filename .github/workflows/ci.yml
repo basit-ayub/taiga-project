@@ -13,7 +13,7 @@ permissions:
 
 jobs:
   # ------------------------------------------------------------------
-  # JOB 1: BACKEND LEGACY TESTS (Whitebox)
+  # JOB 1: BACKEND LEGACY TESTS
   # ------------------------------------------------------------------
   backend-legacy-tests:
     runs-on: ubuntu-latest
@@ -42,9 +42,19 @@ jobs:
         with:
           python-version: '3.11'
 
+      # FIX 1: AGGRESSIVE CONFIG REPLACEMENT
       - name: Prepare Backend Environment
         run: |
           cp backend/docker/config.py backend/settings/config.py
+          
+          # 1. Try to replace existing line if it exists
+          sed -i "s/SECRET_KEY =.*/SECRET_KEY = 'hardcoded-ci-key-123'/" backend/settings/config.py
+          
+          # 2. Append it to the end just in case it wasn't there
+          echo "" >> backend/settings/config.py
+          echo "SECRET_KEY = 'hardcoded-ci-key-123'" >> backend/settings/config.py
+          
+          # Delete broken test file
           rm -f backend/tests/unit/test_serializer_mixins.py
 
       - name: Install Dependencies
@@ -54,7 +64,7 @@ jobs:
           pip install -r backend/requirements-devel.txt
           pip install pytest-django pytest-cov
 
-      - name: Run Pytest (Legacy Suite)
+      - name: Run Pytest
         env:
           DJANGO_SETTINGS_MODULE: settings.config
           PYTHONPATH: backend
@@ -63,7 +73,8 @@ jobs:
           TAIGA_DB_PASSWORD: password123
           TAIGA_DB_HOST: localhost
           TAIGA_RABBITMQ_HOST: localhost
-          SECRET_KEY: "secret-key-for-tests-only" 
+          # Double redundancy: Set Env Var too
+          SECRET_KEY: "hardcoded-ci-key-123"
         run: |
           cd backend
           pytest --cov=. --cov-report=html:htmlcov
@@ -76,7 +87,7 @@ jobs:
           path: backend/htmlcov/
 
   # ------------------------------------------------------------------
-  # JOB 2: FRONTEND E2E TESTS (Blackbox)
+  # JOB 2: FRONTEND E2E TESTS (Low Memory Mode)
   # ------------------------------------------------------------------
   frontend-tests:
     runs-on: ubuntu-latest
@@ -94,26 +105,45 @@ jobs:
           echo "RABBITMQ_USER=taiga" >> .env
           echo "RABBITMQ_PASS=taiga" >> .env
           echo "ENABLE_TELEMETRY=False" >> .env
+          echo "EMAIL_HOST=localhost" >> .env
+          echo "EMAIL_PORT=25" >> .env
+          echo "EMAIL_HOST_USER=user" >> .env
+          echo "EMAIL_HOST_PASSWORD=pass" >> .env
+          echo "EMAIL_DEFAULT_FROM=test@test.com" >> .env
+          echo "EMAIL_USE_TLS=False" >> .env
+          echo "EMAIL_USE_SSL=False" >> .env
+          echo "SUBPATH=" >> .env
+          echo "RABBITMQ_VHOST=taiga" >> .env
+          echo "RABBITMQ_ERLANG_COOKIE=secret" >> .env
 
-      - name: Start Taiga Docker Stack
-        run: docker compose up -d
+      # FIX 2: ISOLATED MIGRATION (The "Low RAM" Strategy)
+      
+      # 1. Start Dependencies ONLY (DB + Rabbit)
+      - name: Start Database
+        run: docker compose up -d db rabbitmq
 
-      - name: Wait for Database to be Ready
-        run: sleep 15
+      - name: Wait for Database
+        run: sleep 10
 
-      - name: Apply Database Migrations
+      # 2. Run Migration in a disposable container (No Web Server running yet!)
+      # This saves about 1GB of RAM compared to the previous attempt
+      - name: Run Migrations (Isolated)
         run: |
-          docker compose exec -T taiga-back python manage.py migrate --noinput
+          docker compose run --rm taiga-back python manage.py migrate --noinput
 
-      - name: Create Superuser (For E2E Login)
+      # 3. Create Superuser (Isolated)
+      - name: Create Superuser (Isolated)
         run: |
-          docker compose exec -T -e DJANGO_SUPERUSER_PASSWORD=password123 taiga-back \
+          docker compose run --rm -e DJANGO_SUPERUSER_PASSWORD=password123 taiga-back \
           python manage.py createsuperuser --noinput --username admin --email admin@test.com
+
+      # 4. NOW start the heavy Web Server (Frontend/Backend)
+      - name: Start Web Application
+        run: docker compose up -d taiga-back taiga-front taiga-gateway taiga-async taiga-events
 
       - name: Smoke Test (Curl)
         run: |
-          # Wait a bit for the frontend to serve the new app
-          sleep 10
+          sleep 20 # Give Nginx time to wake up
           curl --fail http://localhost:9000 || exit 1
           mkdir -p frontend-report
           echo "<html><h1>Frontend Tests Passed</h1></html>" > frontend-report/index.html
