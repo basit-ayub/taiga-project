@@ -100,9 +100,6 @@ jobs:
   # ------------------------------------------------------------------
   # JOB 2: FRONTEND E2E TESTS (Low Memory Mode)
   # ------------------------------------------------------------------
-# ------------------------------------------------------------------
-  # JOB 2: FRONTEND E2E TESTS (Robust Mode)
-  # ------------------------------------------------------------------
   frontend-tests:
     runs-on: ubuntu-latest
     steps:
@@ -150,9 +147,10 @@ jobs:
           docker compose run --rm --entrypoint python -e DJANGO_SUPERUSER_PASSWORD=password123 taiga-back \
           manage.py createsuperuser --noinput --username admin --email admin@test.com
 
-      # 4. Start the Web Stack
+      
+    # 4. NOW start the heavy Web Server (Include 'taiga-protected'!)
       - name: Start Web Application
-        run: docker compose up -d taiga-back taiga-front taiga-gateway taiga-async taiga-events
+        run: docker compose up -d taiga-back taiga-front taiga-gateway taiga-async taiga-events taiga-protected
 
       # FIX: SMART RETRY LOOP + DEBUGGING
       - name: Smoke Test (Smart Retry)
