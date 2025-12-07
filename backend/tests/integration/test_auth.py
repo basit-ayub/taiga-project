@@ -493,3 +493,562 @@ def test_login_fail_throttling(client, settings):
 
     settings.REST_FRAMEWORK["DEFAULT_THROTTLE_RATES"]["login-fail"] = None
 
+
+#################
+# Token Refresh
+#################
+
+def test_refresh_token_success(client, settings):
+    """Test successful token refresh returns new access token.
+    
+    Covers: auth/api.py lines 90-93, auth/services.py lines 81-104
+    """
+    settings.PUBLIC_REGISTER_ENABLED = False
+    user = factories.UserFactory()
+
+    # First, login to get tokens
+    auth_data = {
+        "username": user.username,
+        "password": user.username,
+        "type": "normal",
+    }
+    response = client.post(reverse("auth-list"), auth_data)
+    assert response.status_code == 200
+    refresh_token = response.data["refresh"]
+
+    # Now refresh the token
+    refresh_data = {"refresh": refresh_token}
+    response = client.post(reverse("auth-refresh"), refresh_data)
+
+    assert response.status_code == 200
+    assert "auth_token" in response.data
+
+
+def test_refresh_token_with_invalid_token(client, settings):
+    """Test refresh with invalid token returns 400.
+    
+    Covers: auth/services.py lines 82-85 (TokenError handling)
+    """
+    settings.PUBLIC_REGISTER_ENABLED = False
+
+    refresh_data = {"refresh": "invalid_refresh_token"}
+    response = client.post(reverse("auth-refresh"), refresh_data)
+
+    assert response.status_code == 400
+
+
+def test_refresh_token_with_expired_token(client, settings):
+    """Test refresh with expired token returns 400.
+    
+    Covers: auth/services.py lines 82-85 (TokenError handling)
+    """
+    from datetime import timedelta
+    from unittest.mock import patch
+    from taiga.auth.tokens import RefreshToken
+    from taiga.auth.utils import aware_utcnow
+
+    settings.PUBLIC_REGISTER_ENABLED = False
+    user = factories.UserFactory()
+
+    # Create an expired refresh token
+    fake_now = aware_utcnow() - timedelta(days=10)
+    with patch('taiga.auth.tokens.aware_utcnow') as fake_aware_utcnow:
+        fake_aware_utcnow.return_value = fake_now
+        expired_token = RefreshToken.for_user(user)
+
+    refresh_data = {"refresh": str(expired_token)}
+    response = client.post(reverse("auth-refresh"), refresh_data)
+
+    assert response.status_code == 400
+
+
+#################
+# Token Verify
+#################
+
+def test_verify_token_forbidden_in_production(client, settings):
+    """Test verify endpoint returns 403 when DEBUG=False.
+    
+    Covers: auth/api.py lines 98-99
+    """
+    settings.DEBUG = False
+    user = factories.UserFactory()
+
+    # First, login to get tokens
+    auth_data = {
+        "username": user.username,
+        "password": user.username,
+        "type": "normal",
+    }
+    response = client.post(reverse("auth-list"), auth_data)
+    auth_token = response.data["auth_token"]
+
+    verify_data = {"token": auth_token}
+    response = client.post(reverse("auth-verify"), verify_data)
+
+    assert response.status_code == 403
+
+
+def test_verify_token_success_in_debug_mode(client, settings):
+    """Test verify endpoint works when DEBUG=True.
+    
+    Covers: auth/api.py lines 101-103, auth/services.py lines 107-109
+    """
+    settings.DEBUG = True
+    user = factories.UserFactory()
+
+    # First, login to get tokens
+    auth_data = {
+        "username": user.username,
+        "password": user.username,
+        "type": "normal",
+    }
+    response = client.post(reverse("auth-list"), auth_data)
+    auth_token = response.data["auth_token"]
+
+    verify_data = {"token": auth_token}
+    response = client.post(reverse("auth-verify"), verify_data)
+
+    assert response.status_code == 200
+
+
+def test_verify_token_invalid_in_debug_mode(client, settings):
+    """Test verify endpoint with invalid token in DEBUG mode.
+    
+    Covers: auth/api.py lines 101-103
+    """
+    settings.DEBUG = True
+
+    verify_data = {"token": "invalid.jwt.token"}
+    response = client.post(reverse("auth-verify"), verify_data)
+
+    assert response.status_code == 400
+
+
+#################
+# Private Registration
+#################
+
+def test_private_registration_with_valid_invitation_token(client, settings):
+    """Test new user registration via invitation token.
+    
+    Covers: auth/api.py lines 119-124, auth/services.py lines 180-211
+    """
+    settings.PUBLIC_REGISTER_ENABLED = True
+    membership = factories.MembershipFactory(user=None)
+
+    register_form = {
+        "username": "new_private_user",
+        "password": "securepassword123",
+        "full_name": "Private User",
+        "email": "private_user@email.com",
+        "accepted_terms": True,
+        "type": "private",
+        "token": membership.token,
+    }
+
+    response = client.post(reverse("auth-register"), register_form)
+    
+    assert response.status_code == 201
+    assert response.data["username"] == "new_private_user"
+    assert response.data["email"] == "private_user@email.com"
+
+    # Verify membership was assigned
+    membership.refresh_from_db()
+    assert membership.user is not None
+    assert membership.user.username == "new_private_user"
+
+
+def test_private_registration_with_duplicate_username(client, settings):
+    """Test private registration fails with duplicate username.
+    
+    Covers: auth/services.py lines 186-188 (is_user_already_registered check)
+    """
+    settings.PUBLIC_REGISTER_ENABLED = True
+    existing_user = factories.UserFactory(username="existing_user")
+    membership = factories.MembershipFactory(user=None)
+
+    register_form = {
+        "username": "existing_user",  # Duplicate
+        "password": "securepassword123",
+        "full_name": "Private User",
+        "email": "new_email@email.com",
+        "accepted_terms": True,
+        "type": "private",
+        "token": membership.token,
+    }
+
+    response = client.post(reverse("auth-register"), register_form)
+    
+    assert response.status_code == 400
+
+
+def test_private_registration_with_duplicate_email(client, settings):
+    """Test private registration fails with duplicate email.
+    
+    Covers: auth/services.py lines 186-188 (is_user_already_registered check)
+    """
+    settings.PUBLIC_REGISTER_ENABLED = True
+    existing_user = factories.UserFactory(email="existing@email.com")
+    membership = factories.MembershipFactory(user=None)
+
+    register_form = {
+        "username": "new_unique_user",
+        "password": "securepassword123",
+        "full_name": "Private User",
+        "email": "existing@email.com",  # Duplicate
+        "accepted_terms": True,
+        "type": "private",
+        "token": membership.token,
+    }
+
+    response = client.post(reverse("auth-register"), register_form)
+    
+    assert response.status_code == 400
+
+
+#################
+# Registration Edge Cases
+#################
+
+def test_register_with_invalid_type(client, settings):
+    """Test registration with invalid type raises 400.
+    
+    Covers: auth/api.py line 140
+    """
+    settings.PUBLIC_REGISTER_ENABLED = True
+
+    register_form = {
+        "username": "testuser",
+        "password": "password",
+        "full_name": "Test User",
+        "email": "test@email.com",
+        "accepted_terms": True,
+        "type": "invalid_type",
+    }
+
+    response = client.post(reverse("auth-register"), register_form)
+    
+    assert response.status_code == 400
+
+
+def test_register_without_accepting_terms(client, settings):
+    """Test registration fails when terms not accepted.
+    
+    Covers: auth/api.py lines 129-131
+    """
+    settings.PUBLIC_REGISTER_ENABLED = True
+
+    register_form = {
+        "username": "testuser",
+        "password": "password",
+        "full_name": "Test User",
+        "email": "test@email.com",
+        "accepted_terms": False,
+        "type": "public",
+    }
+
+    response = client.post(reverse("auth-register"), register_form)
+    
+    assert response.status_code == 400
+
+
+def test_register_with_terms_not_provided(client, settings):
+    """Test registration fails when terms field not provided.
+    
+    Covers: auth/api.py lines 129-131
+    """
+    settings.PUBLIC_REGISTER_ENABLED = True
+
+    register_form = {
+        "username": "testuser",
+        "password": "password",
+        "full_name": "Test User",
+        "email": "test@email.com",
+        # accepted_terms not provided
+        "type": "public",
+    }
+
+    response = client.post(reverse("auth-register"), register_form)
+    
+    assert response.status_code == 400
+
+
+#################
+# Login Edge Cases
+#################
+
+def test_login_with_invalid_type(client, settings):
+    """Test login with invalid type raises 400.
+    
+    Covers: auth/api.py lines 78-79
+    """
+    settings.PUBLIC_REGISTER_ENABLED = False
+    user = factories.UserFactory()
+
+    auth_data = {
+        "username": user.username,
+        "password": user.username,
+        "type": "invalid_auth_type",
+    }
+
+    response = client.post(reverse("auth-list"), auth_data)
+    
+    assert response.status_code == 400
+
+
+def test_login_with_empty_type(client, settings):
+    """Test login without type uses 'normal' by default (empty string).
+    
+    Covers: auth/api.py line 71 (login_type default handling)
+    """
+    settings.PUBLIC_REGISTER_ENABLED = False
+    user = factories.UserFactory()
+
+    auth_data = {
+        "username": user.username,
+        "password": user.username,
+        "type": "",  # Empty type should use default
+    }
+
+    response = client.post(reverse("auth-list"), auth_data)
+    
+    # Empty type is not "normal", so it should fail
+    assert response.status_code == 400
+
+
+###############################################################################
+# ADDITIONAL COVERAGE TESTS - Added to cover missed lines
+###############################################################################
+
+def test_register_with_invalid_type(client, settings):
+    """Test registration with invalid type raises 400.
+    
+    Covers: auth/api.py line 140 (else branch for invalid registration type)
+    """
+    settings.PUBLIC_REGISTER_ENABLED = True
+    
+    register_data = {
+        "username": "test_invalid_type",
+        "password": "password123",
+        "full_name": "Test User",
+        "email": "invalid_type@email.com",
+        "accepted_terms": True,
+        "type": "neither_public_nor_private",
+    }
+    
+    response = client.post(reverse("auth-register"), register_data)
+    assert response.status_code == 400
+
+
+def test_register_without_accepted_terms(client, settings):
+    """Test registration without accepted_terms raises 400.
+    
+    Covers: auth/api.py lines 129-131
+    """
+    settings.PUBLIC_REGISTER_ENABLED = True
+    
+    register_data = {
+        "username": "test_no_terms",
+        "password": "password123",
+        "full_name": "Test User",
+        "email": "noterms@email.com",
+        "accepted_terms": False,
+        "type": "public",
+    }
+    
+    response = client.post(reverse("auth-register"), register_data)
+    assert response.status_code == 400
+
+
+def test_register_with_accepted_terms_none(client, settings):
+    """Test registration with accepted_terms=None raises 400.
+    
+    Covers: auth/api.py lines 129-131
+    """
+    settings.PUBLIC_REGISTER_ENABLED = True
+    
+    register_data = {
+        "username": "test_terms_none",
+        "password": "password123",
+        "full_name": "Test User",
+        "email": "termsnone@email.com",
+        "type": "public",
+        # accepted_terms omitted (None)
+    }
+    
+    response = client.post(reverse("auth-register"), register_data)
+    assert response.status_code == 400
+
+
+def test_register_duplicate_username(client, settings):
+    """Test registration with duplicate username raises 400.
+    
+    Covers: auth/services.py lines 134-136 (is_user_already_registered username check)
+    """
+    settings.PUBLIC_REGISTER_ENABLED = True
+    
+    user = factories.UserFactory(username="duplicate_user")
+    
+    register_data = {
+        "username": "duplicate_user",
+        "password": "password123",
+        "full_name": "Test User",
+        "email": "new_unique@email.com",
+        "accepted_terms": True,
+        "type": "public",
+    }
+    
+    response = client.post(reverse("auth-register"), register_data)
+    assert response.status_code == 400
+
+
+def test_register_duplicate_email(client, settings):
+    """Test registration with duplicate email raises 400.
+    
+    Covers: auth/services.py lines 138-139 (is_user_already_registered email check)
+    """
+    settings.PUBLIC_REGISTER_ENABLED = True
+    
+    user = factories.UserFactory(email="duplicate@email.com")
+    
+    register_data = {
+        "username": "new_unique_user",
+        "password": "password123",
+        "full_name": "Test User",
+        "email": "duplicate@email.com",
+        "accepted_terms": True,
+        "type": "public",
+    }
+    
+    response = client.post(reverse("auth-register"), register_data)
+    assert response.status_code == 400
+
+
+def test_verify_forbidden_when_not_debug(client, settings):
+    """Test verify endpoint returns 403 when not in DEBUG mode.
+    
+    Covers: auth/api.py lines 98-99
+    """
+    settings.DEBUG = False
+    
+    response = client.post(reverse("auth-verify"), {"token": "any_token"})
+    assert response.status_code == 403
+
+
+def test_login_with_invitation_token(client, settings):
+    """Test login with invitation token processes invitation.
+    
+    Covers: auth/api.py lines 82-84 (invitation token processing)
+    """
+    settings.PUBLIC_REGISTER_ENABLED = False
+    
+    user = factories.UserFactory()
+    membership = factories.MembershipFactory(user=None)
+    
+    auth_data = {
+        "username": user.username,
+        "password": user.username,
+        "type": "normal",
+        "invitation_token": membership.token,
+    }
+    
+    response = client.post(reverse("auth-list"), auth_data)
+    
+    assert response.status_code == 200
+    membership.refresh_from_db()
+    assert membership.user == user
+
+
+def test_private_registration_success(client, settings):
+    """Test private registration with valid token.
+    
+    Covers: auth/services.py lines 180-211 (private_register_for_new_user)
+    """
+    settings.PUBLIC_REGISTER_ENABLED = True
+    
+    membership = factories.MembershipFactory(user=None)
+    
+    register_data = {
+        "username": "new_private_user",
+        "password": "password123",
+        "full_name": "Private User",
+        "email": "private_user@email.com",
+        "accepted_terms": True,
+        "type": "private",
+        "token": membership.token,
+    }
+    
+    response = client.post(reverse("auth-register"), register_data)
+    
+    assert response.status_code == 201
+    membership.refresh_from_db()
+    assert membership.user is not None
+
+
+def test_private_registration_duplicate_username(client, settings):
+    """Test private registration with duplicate username.
+    
+    Covers: auth/services.py lines 186-188
+    """
+    settings.PUBLIC_REGISTER_ENABLED = True
+    
+    existing_user = factories.UserFactory(username="existing_private_user")
+    membership = factories.MembershipFactory(user=None)
+    
+    register_data = {
+        "username": "existing_private_user",
+        "password": "password123",
+        "full_name": "Private User",
+        "email": "newprivate@email.com",
+        "accepted_terms": True,
+        "type": "private",
+        "token": membership.token,
+    }
+    
+    response = client.post(reverse("auth-register"), register_data)
+    assert response.status_code == 400
+
+
+def test_refresh_token_invalid(client):
+    """Test refresh with invalid token returns 401.
+    
+    Covers: auth/services.py lines 82-85 (TokenError -> InvalidToken)
+    """
+    response = client.post(reverse("auth-refresh"), {"refresh": "invalid_token"})
+    assert response.status_code == 401
+
+
+def test_refresh_token_success(client):
+    """Test refresh with valid token returns new tokens.
+    
+    Covers: auth/services.py lines 81-104
+    """
+    from taiga.auth.tokens import RefreshToken
+    
+    user = factories.UserFactory()
+    refresh = RefreshToken.for_user(user)
+    
+    response = client.post(reverse("auth-refresh"), {"refresh": str(refresh)})
+    
+    assert response.status_code == 200
+    assert "auth_token" in response.data
+
+
+def test_token_denylist(client):
+    """Test denylisted token is rejected on refresh.
+    
+    Covers: auth/tokens.py lines 217-244 (DenylistMixin)
+    """
+    from taiga.auth.tokens import RefreshToken
+    
+    user = factories.UserFactory()
+    refresh = RefreshToken.for_user(user)
+    
+    # Denylist the token
+    refresh.denylist()
+    
+    # Try to use the denylisted token
+    response = client.post(reverse("auth-refresh"), {"refresh": str(refresh)})
+    assert response.status_code == 401
+

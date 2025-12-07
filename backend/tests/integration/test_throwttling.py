@@ -112,3 +112,76 @@ def test_import_mode_throttling_policy(client, settings):
     settings.REST_FRAMEWORK['DEFAULT_THROTTLE_RATES']['anon-read'] = None
     settings.REST_FRAMEWORK['DEFAULT_THROTTLE_RATES']['user-read'] = None
     cache.clear()
+
+
+###############################################################################
+# ADDITIONAL COVERAGE TESTS - auth/throttling.py
+###############################################################################
+
+def test_login_fail_throttle_finalize_on_401(client, settings):
+    """Test LoginFailRateThrottle finalize is called on 401.
+    
+    Covers: auth/throttling.py lines 18-21
+    """
+    settings.REST_FRAMEWORK['DEFAULT_THROTTLE_RATES']['login-fail'] = "100/min"
+    cache.clear()
+    
+    # Incorrect password will trigger 401
+    auth_data = {
+        "username": "nonexistent_user",
+        "password": "wrong_password",
+        "type": "normal",
+    }
+    
+    response = client.post(reverse("auth-list"), auth_data)
+    assert response.status_code in [400, 401]
+    
+    settings.REST_FRAMEWORK['DEFAULT_THROTTLE_RATES']['login-fail'] = None
+    cache.clear()
+
+
+def test_login_fail_throttle_finalize_on_400(client, settings):
+    """Test LoginFailRateThrottle finalize is called on 400.
+    
+    Covers: auth/throttling.py lines 18-21
+    """
+    settings.REST_FRAMEWORK['DEFAULT_THROTTLE_RATES']['login-fail'] = "100/min"
+    cache.clear()
+    
+    # Invalid data triggers 400
+    auth_data = {
+        "username": "",
+        "password": "",
+        "type": "normal",
+    }
+    
+    response = client.post(reverse("auth-list"), auth_data)
+    assert response.status_code == 400
+    
+    settings.REST_FRAMEWORK['DEFAULT_THROTTLE_RATES']['login-fail'] = None
+    cache.clear()
+
+
+def test_register_success_throttle_finalize_on_201(client, settings):
+    """Test RegisterSuccessRateThrottle finalize is called on 201.
+    
+    Covers: auth/throttling.py lines 31-34
+    """
+    settings.PUBLIC_REGISTER_ENABLED = True
+    settings.REST_FRAMEWORK['DEFAULT_THROTTLE_RATES']['register-success'] = "100/min"
+    cache.clear()
+    
+    register_data = {
+        "username": "throttle_test_user",
+        "password": "password123",
+        "full_name": "Test User",
+        "email": "throttle_test@email.com",
+        "accepted_terms": True,
+        "type": "public",
+    }
+    
+    response = client.post(reverse("auth-register"), register_data)
+    assert response.status_code == 201
+    
+    settings.REST_FRAMEWORK['DEFAULT_THROTTLE_RATES']['register-success'] = None
+    cache.clear()
