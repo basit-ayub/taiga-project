@@ -6,7 +6,6 @@ on:
   pull_request:
     branches: [ "main" ]
 
-# Permissions for GitHub Pages
 permissions:
   contents: read
   pages: write
@@ -19,7 +18,6 @@ jobs:
   backend-legacy-tests:
     runs-on: ubuntu-latest
     
-    # Run DB and RabbitMQ directly on the runner (Faster than Docker Compose for Unit Tests)
     services:
       postgres:
         image: postgres:13
@@ -44,7 +42,6 @@ jobs:
         with:
           python-version: '3.11'
 
-      # FIX 1: Create Config & Remove the broken file causing "Collection Error"
       - name: Prepare Backend Environment
         run: |
           cp backend/docker/config.py backend/settings/config.py
@@ -61,15 +58,14 @@ jobs:
         env:
           DJANGO_SETTINGS_MODULE: settings.config
           PYTHONPATH: backend
-          # Override config.py to use the Service Containers
           TAIGA_DB_NAME: test_taiga
           TAIGA_DB_USER: postgres
           TAIGA_DB_PASSWORD: password123
           TAIGA_DB_HOST: localhost
           TAIGA_RABBITMQ_HOST: localhost
+          SECRET_KEY: "secret-key-for-tests-only" 
         run: |
           cd backend
-          # Run tests and generate HTML report
           pytest --cov=. --cov-report=html:htmlcov
 
       - name: Upload Backend Coverage
@@ -87,7 +83,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # FIX 2: Create .env file so Docker DB doesn't crash
       - name: Create .env file
         run: |
           echo "TAIGA_SCHEME=http" >> .env
@@ -103,19 +98,23 @@ jobs:
       - name: Start Taiga Docker Stack
         run: docker compose up -d
 
-      - name: Wait for Backend to be Ready
-        run: sleep 20 # Give containers time to initialize
+      - name: Wait for Database to be Ready
+        run: sleep 15
+
+      - name: Apply Database Migrations
+        run: |
+          docker compose exec -T taiga-back python manage.py migrate --noinput
 
       - name: Create Superuser (For E2E Login)
         run: |
           docker compose exec -T -e DJANGO_SUPERUSER_PASSWORD=password123 taiga-back \
           python manage.py createsuperuser --noinput --username admin --email admin@test.com
 
-      # SMOKE TEST: Check if Frontend is responding (Replace with Cypress later)
       - name: Smoke Test (Curl)
         run: |
+          # Wait a bit for the frontend to serve the new app
+          sleep 10
           curl --fail http://localhost:9000 || exit 1
-          # Create a dummy report file to prevent Artifact Upload failure
           mkdir -p frontend-report
           echo "<html><h1>Frontend Tests Passed</h1></html>" > frontend-report/index.html
 
@@ -134,7 +133,6 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      # Just verifying the build passes one last time
       - name: Build Docker Images
         run: docker compose build
 
