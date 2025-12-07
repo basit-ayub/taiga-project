@@ -188,8 +188,7 @@ jobs:
           file: ./frontend/docker/Dockerfile
           push: true
           tags: ${{ secrets.DOCKER_USERNAME }}/taiga-front:latest
-
-  # ==============================================================================
+# ==============================================================================
   # STAGE 3: STAGING DEPLOYMENT (DigitalOcean)
   # ==============================================================================
   deploy-staging:
@@ -197,9 +196,15 @@ jobs:
     runs-on: ubuntu-latest
     environment: 
       name: staging
-      url: http://${{ secrets.DROPLET_IP }}:9000
+      # FIX: Use step output, not secret directly
+      url: ${{ steps.set_url.outputs.app_url }}
     
     steps:
+      # NEW STEP: Expose the IP safely for the environment URL
+      - name: Set Environment URL
+        id: set_url
+        run: echo "app_url=http://${{ secrets.DROPLET_IP }}:9000" >> $GITHUB_OUTPUT
+
       - uses: actions/checkout@v4
       
       - name: Deploy to DigitalOcean Droplet
@@ -220,7 +225,7 @@ jobs:
             mkdir -p /root/taiga-deploy
             cd /root/taiga-deploy
             
-            # 4. Create docker-compose.yml dynamically (using images, not build)
+            # 4. Create docker-compose.yml dynamically
             cat <<EOF > docker-compose.yml
             version: "3.5"
             services:
@@ -235,6 +240,8 @@ jobs:
                   - POSTGRES_USER=taiga
                   - POSTGRES_PASSWORD=taiga
                   - TAIGA_SECRET_KEY=prod-secret-key
+                  - TAIGA_SITES_SCHEME=http
+                  - TAIGA_SITES_DOMAIN=${{ secrets.DROPLET_IP }}:9000
                 depends_on: [taiga-db, taiga-events, taiga-async]
               
               taiga-db:
@@ -246,16 +253,29 @@ jobs:
               
               taiga-events:
                 image: taigaio/taiga-events:latest
+                environment:
+                  - RABBITMQ_USER=taiga
+                  - RABBITMQ_PASS=taiga
               
               taiga-async:
                 image: ${{ secrets.DOCKER_USERNAME }}/taiga-back:latest
                 entrypoint: ["/taiga-back/docker/async_entrypoint.sh"]
+                environment:
+                  - TAIGA_SECRET_KEY=prod-secret-key
+                  - POSTGRES_USER=taiga
+                  - POSTGRES_PASSWORD=taiga
               
               taiga-events-rabbitmq:
                 image: rabbitmq:3.8-management-alpine
+                environment:
+                  - RABBITMQ_DEFAULT_USER=taiga
+                  - RABBITMQ_DEFAULT_PASS=taiga
               
               taiga-async-rabbitmq:
                 image: rabbitmq:3.8-management-alpine
+                environment:
+                  - RABBITMQ_DEFAULT_USER=taiga
+                  - RABBITMQ_DEFAULT_PASS=taiga
             EOF
             
             # 5. Start Staging
@@ -269,10 +289,15 @@ jobs:
     needs: deploy-staging
     runs-on: ubuntu-latest
     environment: 
-      name: production  # <--- Configure "Required Reviewers" in GitHub Settings for this Env
-      url: http://${{ secrets.DROPLET_IP }}:9000
+      name: production
+      # FIX: Use step output here too
+      url: ${{ steps.set_url.outputs.app_url }}
     
     steps:
+      - name: Set Environment URL
+        id: set_url
+        run: echo "app_url=http://${{ secrets.DROPLET_IP }}:9000" >> $GITHUB_OUTPUT
+
       - name: Production Deployment
         uses: appleboy/ssh-action@v1.0.0
         with:
@@ -282,8 +307,6 @@ jobs:
           script: |
             echo "🚀 Deploying to PRODUCTION..."
             cd /root/taiga-deploy
-            # In a real setup, this might point to a different Droplet
-            # For this project, we re-deploy to ensure the "Gate" works
             docker compose pull
             docker compose up -d
             echo "✅ Monitoring Active (Sentry)"
@@ -292,7 +315,7 @@ jobs:
   # REPORTING: GITHUB PAGES
   # ==============================================================================
   deploy-reports:
-    needs: [backend-tests, frontend-tests]
+    needs: [backend-legacy-tests, frontend-tests]
     if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     environment:
