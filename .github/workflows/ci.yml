@@ -16,7 +16,7 @@ jobs:
   # STAGE 1: CONTINUOUS INTEGRATION (TESTING)
   # ==============================================================================
   
-  # JOB 1: BACKEND UNIT TESTS (Whitebox)
+  # JOB 1: BACKEND TESTS (Whitebox - Unit & Legacy)
   backend-tests:
     runs-on: ubuntu-latest
     services:
@@ -58,7 +58,7 @@ jobs:
           pip install pytest-django pytest-cov
 
       - name: Run Backend Tests
-        continue-on-error: true # Allow legacy failures, we want the report
+        continue-on-error: true # Keep pipeline alive even if legacy tests fail
         env:
           DJANGO_SETTINGS_MODULE: settings.config
           PYTHONPATH: backend
@@ -85,9 +85,9 @@ jobs:
           name: backend-coverage
           path: backend/htmlcov/
 
-  # JOB 2: FRONTEND SMOKE TESTS (Blackbox)
+  # JOB 2: FRONTEND SMOKE TESTS (Blackbox - E2E)
   frontend-tests:
-    runs-on: ubuntu-latest # Reverted to Cloud Runner per your request
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
@@ -115,23 +115,28 @@ jobs:
           echo "ATTACHMENTS_MAX_AGE=360" >> .env
           echo "WEBSOCKETS_SCHEME=ws" >> .env
 
+      # 1. Start DB Only (Low Memory Strategy)
       - name: Start Database & Async
         run: docker compose up -d taiga-db taiga-async-rabbitmq taiga-events-rabbitmq
 
       - name: Wait for DB
         run: sleep 15
 
-      - name: Run Migrations (Low Memory)
+      # 2. Run Migrations Isolated
+      - name: Run Migrations
         run: docker compose run --rm --entrypoint python taiga-back manage.py migrate --noinput
 
-      - name: Create Superuser (Low Memory)
+      # 3. Create User Isolated
+      - name: Create Superuser
         run: |
           docker compose run --rm --entrypoint python -e DJANGO_SUPERUSER_PASSWORD=password123 taiga-back \
           manage.py createsuperuser --noinput --username admin --email admin@test.com
 
+      # 4. Start Full Stack
       - name: Start Full Stack
         run: docker compose up -d taiga-back taiga-front taiga-gateway taiga-async taiga-events taiga-protected
 
+      # 5. Verify
       - name: Smoke Test (Smart Retry)
         run: |
           echo "Waiting for Taiga..."
@@ -188,7 +193,8 @@ jobs:
           file: ./frontend/docker/Dockerfile
           push: true
           tags: ${{ secrets.DOCKER_USERNAME }}/taiga-front:latest
-# ==============================================================================
+
+  # ==============================================================================
   # STAGE 3: STAGING DEPLOYMENT (DigitalOcean)
   # ==============================================================================
   deploy-staging:
@@ -196,11 +202,9 @@ jobs:
     runs-on: ubuntu-latest
     environment: 
       name: staging
-      # FIX: Use step output, not secret directly
       url: ${{ steps.set_url.outputs.app_url }}
     
     steps:
-      # NEW STEP: Expose the IP safely for the environment URL
       - name: Set Environment URL
         id: set_url
         run: echo "app_url=http://${{ secrets.DROPLET_IP }}:9000" >> $GITHUB_OUTPUT
@@ -290,7 +294,6 @@ jobs:
     runs-on: ubuntu-latest
     environment: 
       name: production
-      # FIX: Use step output here too
       url: ${{ steps.set_url.outputs.app_url }}
     
     steps:
@@ -309,13 +312,13 @@ jobs:
             cd /root/taiga-deploy
             docker compose pull
             docker compose up -d
-            echo "✅ Monitoring Active (Sentry)"
+            echo "✅ Monitoring Active"
 
   # ==============================================================================
   # REPORTING: GITHUB PAGES
   # ==============================================================================
   deploy-reports:
-    needs: [backend-legacy-tests, frontend-tests]
+    needs: [backend-tests, frontend-tests]
     if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     environment:
