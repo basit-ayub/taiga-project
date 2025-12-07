@@ -12,7 +12,7 @@ permissions:
   id-token: write
 
 jobs:
-# ------------------------------------------------------------------
+  # ------------------------------------------------------------------
   # JOB 1: BACKEND LEGACY TESTS (Whitebox)
   # ------------------------------------------------------------------
   backend-legacy-tests:
@@ -46,7 +46,7 @@ jobs:
         run: |
           cp backend/docker/config.py backend/settings/config.py
           
-          # Force set the Secret Key so it can't fail
+          # Force set the Secret Key
           sed -i "s/SECRET_KEY =.*/SECRET_KEY = 'hardcoded-ci-key-123'/" backend/settings/config.py
           echo "" >> backend/settings/config.py
           echo "SECRET_KEY = 'hardcoded-ci-key-123'" >> backend/settings/config.py
@@ -59,6 +59,8 @@ jobs:
           pip install --upgrade pip wheel
           pip install -r backend/requirements.txt
           pip install -r backend/requirements-devel.txt
+          # FIX 1: Install the missing 'contrib' packages (fixes ModuleNotFoundError)
+          pip install -r backend/requirements-contribs.txt
           pip install pytest-django pytest-cov
 
       - name: Run Pytest (Legacy Suite)
@@ -67,20 +69,18 @@ jobs:
           PYTHONPATH: backend
           SECRET_KEY: "hardcoded-ci-key-123"
           
-          # --- THE FIX: PROVIDE ALL POSSIBLE VARIABLE NAMES ---
-          # Taiga Variable Names
+          # Env vars for config.py
           TAIGA_DB_NAME: test_taiga
           TAIGA_DB_USER: postgres
           TAIGA_DB_PASSWORD: password123
           TAIGA_DB_HOST: localhost
           TAIGA_RABBITMQ_HOST: localhost
           
-          # Docker/Standard Variable Names (The config.py likely needs these!)
+          # Fallback env vars
           POSTGRES_DB: test_taiga
           POSTGRES_USER: postgres
           POSTGRES_PASSWORD: password123
           POSTGRES_HOST: localhost
-          # ----------------------------------------------------
           
         run: |
           cd backend
@@ -112,6 +112,7 @@ jobs:
           echo "RABBITMQ_USER=taiga" >> .env
           echo "RABBITMQ_PASS=taiga" >> .env
           echo "ENABLE_TELEMETRY=False" >> .env
+          # Defaults
           echo "EMAIL_HOST=localhost" >> .env
           echo "EMAIL_PORT=25" >> .env
           echo "EMAIL_HOST_USER=user" >> .env
@@ -122,9 +123,9 @@ jobs:
           echo "SUBPATH=" >> .env
           echo "RABBITMQ_VHOST=taiga" >> .env
           echo "RABBITMQ_ERLANG_COOKIE=secret" >> .env
+          echo "ATTACHMENTS_MAX_AGE=360" >> .env
+          echo "WEBSOCKETS_SCHEME=ws" >> .env
 
-      # FIX 2: ISOLATED MIGRATION (The "Low RAM" Strategy)
-      
       # 1. Start Dependencies ONLY (DB + Rabbit)
       - name: Start Database
         run: docker compose up -d taiga-db taiga-async-rabbitmq taiga-events-rabbitmq
@@ -132,19 +133,18 @@ jobs:
       - name: Wait for Database
         run: sleep 10
 
-      # 2. Run Migration in a disposable container (No Web Server running yet!)
-      # This saves about 1GB of RAM compared to the previous attempt
+      # FIX 2: Override Entrypoint to bypass Gunicorn
       - name: Run Migrations (Isolated)
         run: |
-          docker compose run --rm taiga-back python manage.py migrate --noinput
+          docker compose run --rm --entrypoint python taiga-back manage.py migrate --noinput
 
-      # 3. Create Superuser (Isolated)
+      # FIX 3: Override Entrypoint for Superuser creation too
       - name: Create Superuser (Isolated)
         run: |
-          docker compose run --rm -e DJANGO_SUPERUSER_PASSWORD=password123 taiga-back \
-          python manage.py createsuperuser --noinput --username admin --email admin@test.com
+          docker compose run --rm --entrypoint python -e DJANGO_SUPERUSER_PASSWORD=password123 taiga-back \
+          manage.py createsuperuser --noinput --username admin --email admin@test.com
 
-      # 4. NOW start the heavy Web Server (Frontend/Backend)
+      # 4. NOW start the heavy Web Server
       - name: Start Web Application
         run: docker compose up -d taiga-back taiga-front taiga-gateway taiga-async taiga-events
 
