@@ -13,10 +13,9 @@ permissions:
 
 jobs:
   # ==============================================================================
-  # STAGE 1: CONTINUOUS INTEGRATION (TESTING)
+  # STAGE 1: CONTINUOUS INTEGRATION
   # ==============================================================================
-  
-  # JOB 1: BACKEND TESTS (Whitebox - Unit & Legacy)
+
   backend-tests:
     runs-on: ubuntu-latest
     services:
@@ -58,7 +57,7 @@ jobs:
           pip install pytest-django pytest-cov
 
       - name: Run Backend Tests
-        continue-on-error: true # Keep pipeline alive even if legacy tests fail
+        continue-on-error: true 
         env:
           DJANGO_SETTINGS_MODULE: settings.config
           PYTHONPATH: backend
@@ -85,7 +84,6 @@ jobs:
           name: backend-coverage
           path: backend/htmlcov/
 
-  # JOB 2: FRONTEND SMOKE TESTS (Blackbox - E2E)
   frontend-tests:
     runs-on: ubuntu-latest
     steps:
@@ -115,18 +113,18 @@ jobs:
           echo "ATTACHMENTS_MAX_AGE=360" >> .env
           echo "WEBSOCKETS_SCHEME=ws" >> .env
 
-      # 1. Start DB Only (Low Memory Strategy)
+      # 1. Start Dependencies
       - name: Start Database & Async
         run: docker compose up -d taiga-db taiga-async-rabbitmq taiga-events-rabbitmq
 
       - name: Wait for DB
         run: sleep 15
 
-      # 2. Run Migrations Isolated
+      # 2. Run Migrations
       - name: Run Migrations
         run: docker compose run --rm --entrypoint python taiga-back manage.py migrate --noinput
 
-      # 3. Create User Isolated
+      # 3. Create Superuser (Required for Cypress Login)
       - name: Create Superuser
         run: |
           docker compose run --rm --entrypoint python -e DJANGO_SUPERUSER_PASSWORD=password123 taiga-back \
@@ -136,25 +134,55 @@ jobs:
       - name: Start Full Stack
         run: docker compose up -d taiga-back taiga-front taiga-gateway taiga-async taiga-events taiga-protected
 
-      # 5. Verify
-      - name: Smoke Test (Smart Retry)
+      # 5. Wait for Nginx
+      - name: Wait for Taiga to be Ready
         run: |
           echo "Waiting for Taiga..."
           for i in {1..12}; do
             if curl -f http://localhost:9000; then
-              echo "✅ Success!"
+              echo "✅ Success! Taiga is up."
               exit 0
             fi
             sleep 5
           done
-          echo "❌ Failed."
+          echo "❌ Failed to connect."
           docker compose logs taiga-gateway
           exit 1
 
-      - name: Generate Dummy Report
+      # 6. Install Cypress
+      - name: Install Cypress Dependencies
+        run: |
+          cd e2e-tests
+          npm install
+          npx cypress install
+
+      # 7. Run Cypress & Capture Log
+      - name: Run Cypress Tests
+        continue-on-error: true 
+        run: |
+          cd e2e-tests
+          # Run Chrome headless and pipe output to both Console AND a log file
+          npx cypress run --browser chrome 2>&1 | tee cypress_output.log
+
+      # 8. Generate Report from Terminal Output
+      - name: Generate Frontend Report
+        if: always()
         run: |
           mkdir -p frontend-report
-          echo "<html><h1>Frontend Tests Passed</h1><p>Smoke test successful.</p></html>" > frontend-report/index.html
+          
+          # Write HTML Header
+          echo '<html><head><title>Frontend Test Log</title></head><body style="font-family: monospace;">' > frontend-report/index.html
+          echo '<h1>Cypress Test Results</h1>' >> frontend-report/index.html
+          echo '<h3>Terminal Output:</h3>' >> frontend-report/index.html
+          
+          # Open Preformatted block
+          echo '<pre style="background: #f4f4f4; padding: 15px; border: 1px solid #ccc; overflow-x: auto;">' >> frontend-report/index.html
+          
+          # Inject the log file content (stripping ANSI colors for better HTML display if desired, but raw is fine)
+          cat e2e-tests/cypress_output.log >> frontend-report/index.html
+          
+          # Close blocks
+          echo '</pre></body></html>' >> frontend-report/index.html
 
       - name: Upload Frontend Report
         if: always()
