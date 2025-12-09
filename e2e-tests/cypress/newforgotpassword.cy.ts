@@ -29,7 +29,7 @@ describe('Forgot Password Form Test Cases', () => {
   // TC-04: Submit valid username
  it('TC-04: Submit valid username', () => {
   cy.visit(url);
-  cy.get('input[name="username"]').type('basit'); // Registered username
+  cy.get('input[name="username"]').type('admin'); // Registered username
   cy.get('button').contains('Reset Password').click();
 
   // Wait for redirect to login page

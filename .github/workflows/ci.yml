@@ -126,7 +126,7 @@ jobs:
 
       - name: Create Superuser
         run: |
-          docker compose run --rm --entrypoint python -e DJANGO_SUPERUSER_PASSWORD=password123 taiga-back \
+          docker compose run --rm --entrypoint python -e DJANGO_SUPERUSER_PASSWORD=admin taiga-back \
           manage.py createsuperuser --noinput --username admin --email admin@test.com
 
       - name: Start Full Stack
